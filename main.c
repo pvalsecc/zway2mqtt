@@ -91,23 +91,6 @@ static char* path2topic(const char* path) {
     return ret;
 }
 
-static char* topic2path(char* topic) {
-    static const char PREFIX[] = "zwave/set/";
-    if(strncmp(topic, PREFIX, sizeof(PREFIX)-1) != 0) {
-        zway_log(zway, Error, ZSTR("invalid topic prefix: %s"), topic);
-        return NULL;
-    }
-    char* path = strdup(topic + (sizeof(PREFIX) - 1));
-    char* tmp = path;
-    
-    while(*tmp) {
-        if(*tmp == '/') *tmp = '.';
-        ++tmp;
-    }
-    
-    return path;
-}
-
 static void notify_update(ZDataHolder data) {
     char *path = zdata_get_path(data);
     char *topic = path2topic(path);
@@ -167,7 +150,6 @@ static void subscribe_command(const ZWay zway, ZWBYTE node_id,
 
 static void device_callback(const ZWay zway, ZWDeviceChangeType type, ZWBYTE node_id,
                             ZWBYTE instance_id, ZWBYTE command_id, void *arg) {
-    if (node_id == 1) return;
     switch (type) {
         case DeviceAdded:
             printf("New device added: %i\n", node_id);
@@ -216,15 +198,12 @@ static void print_zway_terminated(ZWay zway, void* arg) {
     zway_log(zway, Information, ZSTR("Z-Way terminated")); 
 }
 
-static void mqtt_callback(void* obj, const struct mosquitto_message *message) {
-    char* path = topic2path(message->topic);
-    if(!path) return;
-    zdata_acquire_lock(ZDataRoot(zway));
+static void handle_devices(const struct mosquitto_message *message) {
     int device_id, instance_id, cc_id;
-    char *rest = alloca(strlen(path));
-    if(sscanf(path, "devices.%d.instances.%d.commandClasses.%d.data.%s",
+    char *rest = alloca(strlen(message->topic));
+    if(sscanf(message->topic, "zwave/set/devices/%d/instances/%d/commandClasses/%d/data/%s",
               &device_id, &instance_id, &cc_id, rest) != 4) {
-        zway_log(zway, Error, ZSTR("Cannot parse %s"), path); 
+        zway_log(zway, Error, ZSTR("Cannot parse %s"), message->topic);
         return;
     }
     ZWError err = InvalidOperation;
@@ -243,8 +222,8 @@ static void mqtt_callback(void* obj, const struct mosquitto_message *message) {
         case 112: {//configuration
             int parameter;
             char *sub = alloca(strlen(rest));
-            if (message->payloadlen == 5 && message->payload[0] == Integer && 
-                    sscanf(rest, "%d.%s", &parameter, sub) == 1 && strcmp(sub, "val")) {
+            if (message->payloadlen == 5 && message->payload[0] == Integer &&
+                    sscanf(rest, "%d/%s", &parameter, sub) == 1 && strcmp(sub, "val")) {
                 int value;
                 memcpy(&value, message->payload+1, 4);
                 err = zway_cc_configuration_set(zway, device_id, instance_id, parameter, value,
@@ -260,24 +239,48 @@ static void mqtt_callback(void* obj, const struct mosquitto_message *message) {
             err = InvalidOperation;
     }
     if(err == NoError) {
-        zway_log(zway, Information, ZSTR("Set data for %s"), path);
+        zway_log(zway, Information, ZSTR("Set data for %s"), message->topic);
     } else {
-        zway_log(zway, Error, ZSTR("Failed to set data for %s: %s"), path, zstrerror(err));
+        zway_log(zway, Error, ZSTR("Failed to set data for %s: %s"), message->topic, zstrerror(err));
     }
-    /*ZDataHolder data = data_from_path(path);
-    if (data) {
-        ZWError err = mqtt2data(message->payload, message->payloadlen, data);
-        if(err == NoError) {
-            zway_log(zway, Error, ZSTR("Set data for %s"), path);
+}
+
+static void handle_control(const struct mosquitto_message *message) {
+    ZWError err = InvalidOperation;
+    if(strcmp(message->topic, "zwave/control/add_node")==0) {
+        if(message->payloadlen == 2 && message->payload[0] == Boolean) {
+            err = zway_fc_add_node_to_network(zway, message->payload[1], TRUE,
+                                              NULL, NULL, NULL);
         } else {
-            zway_log(zway, Error, ZSTR("Failed to set data for %s: %s"), path, zstrerror(err));
+            zway_log(zway, Error, ZSTR("Invalid type or path for add_node"));
+            err = InvalidType;
         }
+    } else if(strcmp(message->topic, "zwave/control/remove_node")==0) {
+        if(message->payloadlen == 2 && message->payload[0] == Boolean) {
+            err = zway_fc_remove_node_from_network(zway, message->payload[1], TRUE,
+                                              NULL, NULL, NULL);
+        } else {
+            zway_log(zway, Error, ZSTR("Invalid type or path for add_node"));
+            err = InvalidType;
+        }
+    }
+    if(err == NoError) {
+        zway_log(zway, Information, ZSTR("Control for %s"), message->topic);
     } else {
-        zway_log(zway, Error, ZSTR("Failed to find data for %s"), path);
-    }*/
-    zdata_release_lock(ZDataRoot(zway));
-    
-    free(path);
+        zway_log(zway, Error, ZSTR("Failed to control %s: %s"), message->topic, zstrerror(err));
+    }
+}
+
+static void mqtt_callback(void* obj, const struct mosquitto_message *message) {
+    const char DEVICES[] = "zwave/set/devices/";
+    const char CONTROL[] = "zwave/control/";
+    if(strncmp(message->topic, DEVICES, sizeof(DEVICES) - 1) == 0) {
+        handle_devices(message);
+    } else if(strncmp(message->topic, CONTROL, sizeof(CONTROL) - 1) == 0) {
+        handle_control(message);
+    } else {
+        zway_log(zway, Error, ZSTR("Unknown path: %s"), message->topic);
+    }
 }
 
 static ZWBOOL init_mqtt() {
@@ -299,11 +302,16 @@ static ZWBOOL init_mqtt() {
         zway_log_error(zway, Critical, "Failed to subscribe to the MQTT server", mqttErr);
         return FALSE;
     }
+    mqttErr = mosquitto_subscribe(mqtt, NULL, "zwave/control/#", 0);
+    if (mqttErr != MOSQ_ERR_SUCCESS) {
+        zway_log_error(zway, Critical, "Failed to subscribe to the MQTT server", mqttErr);
+        return FALSE;
+    }
     return TRUE;
 }
 
 int main(int argc, char **argv) {
-    ZWLog logger = zlog_create(stdout, Warning);
+    ZWLog logger = zlog_create(stdout, Information);
     ZWError r = zway_init(&zway, ZSTR("/dev/ttyAMA0"), "/opt/z-way-server/config",
                           "/opt/z-way-server/translations", "/opt/z-way-server/ZDDX",
                           NULL, logger);
