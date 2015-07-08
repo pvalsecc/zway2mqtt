@@ -252,7 +252,7 @@ static void handle_control(const struct mosquitto_message *message) {
             err = zway_fc_add_node_to_network(zway, message->payload[1], TRUE,
                                               NULL, NULL, NULL);
         } else {
-            zway_log(zway, Error, ZSTR("Invalid type or path for add_node"));
+            zway_log(zway, Error, ZSTR("Invalid type for add_node len=%d type=%d"), message->payloadlen, message->payload[0]);
             err = InvalidType;
         }
     } else if(strcmp(message->topic, "zwave/control/remove_node")==0) {
@@ -260,7 +260,7 @@ static void handle_control(const struct mosquitto_message *message) {
             err = zway_fc_remove_node_from_network(zway, message->payload[1], TRUE,
                                               NULL, NULL, NULL);
         } else {
-            zway_log(zway, Error, ZSTR("Invalid type or path for add_node"));
+            zway_log(zway, Error, ZSTR("Invalid type for add_node"));
             err = InvalidType;
         }
     }
