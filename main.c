@@ -22,46 +22,44 @@ static void data2mqtt(ZDataHolder data, uint8_t **payload,  uint32_t *payloadLen
     const ZWBYTE *binary;
     size_t len;
 
-    switch (type) 
+    switch (type)
     {
         case Empty:
             *payloadLen = 1;
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
             break;
         case Boolean:
             zdata_get_boolean(data, &bool_val);
             *payloadLen = 2;
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
             (*payload)[1] = bool_val;
             break;
         case Integer:
             zdata_get_integer(data, &int_val);
             *payloadLen = 5;
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
-            memcpy((*payload)+1, &int_val, 4);
+            uint8_t* pl = *payload;
+            pl[1] = ((unsigned)int_val) >> 24;
+            pl[2] = ((unsigned)int_val) >> 16;
+            pl[3] = ((unsigned)int_val) >> 8;
+            pl[4] = ((unsigned)int_val);
             break;
         case Float:
             zdata_get_float(data, &float_val);
             *payloadLen = 1 + sizeof(float);
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
             memcpy((*payload)+1, &float_val, sizeof(float));
             break;
         case String:
             zdata_get_string(data, &str_val);
             *payloadLen = 1 + strlen(str_val) + 1;
             *payload = calloc(*payloadLen, 1);
-            (*payload)[0] = type;
             strcpy(((char*)*payload)+1, str_val);
             break;
         case Binary:
             zdata_get_binary(data, &binary, &len);
             *payloadLen = 1 + len;
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
             memcpy((*payload)+1, binary, len);
             break;
         case ArrayOfInteger:
@@ -70,9 +68,10 @@ static void data2mqtt(ZDataHolder data, uint8_t **payload,  uint32_t *payloadLen
         default:
             *payloadLen = 1;
             *payload = malloc(*payloadLen);
-            (*payload)[0] = type;
+            //TODO
             break;
     }
+    (*payload)[0] = type;
 }
 
 static void subscribe_data(const ZWay zway, ZDataHolder data);
@@ -190,6 +189,25 @@ static void print_zway_terminated(ZWay zway, void* arg) {
     zway_log(zway, Information, ZSTR("Z-Way terminated")); 
 }
 
+static bool is_boolean(const struct mosquitto_message *message) {
+    return message->payloadlen == 2 && message->payload[0] == Boolean;
+}
+
+static bool get_boolean(const struct mosquitto_message *message) {
+    assert(is_boolean(message));
+    return message->payload[1] ? TRUE : FALSE;
+}
+
+static bool is_integer(const struct mosquitto_message *message) {
+    return message->payloadlen == 5 && message->payload[0] == Integer;
+}
+
+static int get_integer(const struct mosquitto_message *message) {
+    assert(is_integer(message));
+    const uint8_t* pl = message->payload;
+    return pl[1]<<24 | pl[2]<<16 | pl[3]<<8 | pl[4];
+}
+
 static void handle_devices(const struct mosquitto_message *message) {
     int device_id, instance_id, cc_id;
     char *rest = alloca(strlen(message->topic));
@@ -201,10 +219,9 @@ static void handle_devices(const struct mosquitto_message *message) {
     ZWError err = InvalidOperation;
     switch(cc_id) {
         case 37: //switch_binary
-            if (message->payloadlen == 2 && message->payload[0] == Boolean &&
-                    strcmp(rest, "level") == 0) {
+            if (is_boolean(message) && strcmp(rest, "level") == 0) {
                 err = zway_cc_switch_binary_set(zway, device_id, instance_id,
-                                                message->payload[1] ? TRUE : FALSE,
+                                                get_boolean(message),
                                                 NULL, NULL, NULL);
             } else {
                 zway_log(zway, Error, ZSTR("Invalid type or path for class %d"), cc_id);
@@ -214,11 +231,10 @@ static void handle_devices(const struct mosquitto_message *message) {
         case 112: {//configuration
             int parameter;
             char *sub = alloca(strlen(rest));
-            if (message->payloadlen == 5 && message->payload[0] == Integer &&
+            if (is_integer(message) &&
                     sscanf(rest, "%d/%s", &parameter, sub) == 1 && strcmp(sub, "val")) {
-                int value;
-                memcpy(&value, message->payload+1, 4);
-                err = zway_cc_configuration_set(zway, device_id, instance_id, parameter, value,
+                err = zway_cc_configuration_set(zway, device_id, instance_id,
+                                                parameter, get_integer(message),
                                                 0, NULL, NULL, NULL);
             } else {
                 zway_log(zway, Error, ZSTR("Invalid type or path for class %d"), cc_id);
@@ -240,16 +256,16 @@ static void handle_devices(const struct mosquitto_message *message) {
 static void handle_control(const struct mosquitto_message *message) {
     ZWError err = InvalidOperation;
     if(strcmp(message->topic, "zwave/control/add_node")==0) {
-        if(message->payloadlen == 2 && message->payload[0] == Boolean) {
-            err = zway_fc_add_node_to_network(zway, message->payload[1], TRUE,
+        if(is_boolean(message)) {
+            err = zway_fc_add_node_to_network(zway, get_boolean(message), TRUE,
                                               NULL, NULL, NULL);
         } else {
             zway_log(zway, Error, ZSTR("Invalid type for add_node len=%d type=%d"), message->payloadlen, message->payload[0]);
             err = InvalidType;
         }
     } else if(strcmp(message->topic, "zwave/control/remove_node")==0) {
-        if(message->payloadlen == 2 && message->payload[0] == Boolean) {
-            err = zway_fc_remove_node_from_network(zway, message->payload[1], TRUE,
+        if(is_boolean(message)) {
+            err = zway_fc_remove_node_from_network(zway, get_boolean(message), TRUE,
                                               NULL, NULL, NULL);
         } else {
             zway_log(zway, Error, ZSTR("Invalid type for add_node"));
