@@ -182,14 +182,6 @@ static void device_callback(const ZWay zway, ZWDeviceChangeType type, ZWBYTE nod
 
 static void do_work() {
     while(TRUE) {
-        /*if (!zway_is_running(zway)) {
-            break;
-        }
-        
-        if (!zway_is_idle(zway)) {
-            sleep_ms(10);
-            continue;
-        }*/
         mosquitto_loop(mqtt, 1000);
     }
 }
@@ -264,6 +256,8 @@ static void handle_control(const struct mosquitto_message *message) {
             err = InvalidType;
         }
     }
+    //TODO: call zddx_save_to_xml or check <SaveDataAfterInterviewSteps> is
+    //      set to 1 in config/Defaults.xml
     if(err == NoError) {
         zway_log(zway, Information, ZSTR("Control for %s"), message->topic);
     } else {
