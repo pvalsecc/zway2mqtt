@@ -1,6 +1,7 @@
 #include <alloca.h>
 #include <stdio.h>
 #include <string.h>
+#include <assert.h>
 
 #include <ZWayLib.h>
 #include <ZLogging.h>
