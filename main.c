@@ -182,7 +182,11 @@ static void device_callback(const ZWay zway, ZWDeviceChangeType type, ZWBYTE nod
 
 static void do_work() {
     while(TRUE) {
-        mosquitto_loop(mqtt, 1000);
+        int status = mosquitto_loop(mqtt, 60000);
+        if (status == MOSQ_ERR_NO_CONN || status == MOSQ_ERR_CONN_LOST) {
+            zway_log(zway, Error, ZSTR("Lost connection with MQTT => reconnect"));
+            mosquitto_reconnect(mqtt);
+	}
     }
 }
 
